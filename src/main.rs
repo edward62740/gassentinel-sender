@@ -3,7 +3,7 @@ use chrono::Utc;
 use coap::Server;
 use coap_lite::{MessageClass, RequestType as Method};
 use futures::prelude::*;
-use influxdb2::{Client};
+use influxdb2::Client;
 use influxdb2_derive::WriteDataPoint;
 use local_ip_address::{local_ip, local_ipv6};
 
@@ -43,11 +43,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pattern = r"^([a-fA-F0-9]{16})(,-?[0-9]+){8}$"; // regex pattern for expected payload
 
     let args: Vec<String> = env::args().collect();
-    if args.len() != 5 {
-        println!("Usage: {} <host> <org> <token> <bucket>", args[0]);
+    if args.len() != 6 {
+        println!("{} Invalid arguments. Must be of the form <influxdb host> <org> <token> <bucket> <coap regtype>", args[0]);
         std::process::exit(1);
     }
 
+    let host = get_argument(&args, 1);
+    let org = get_argument(&args, 2);
+    let token = get_argument(&args, 3);
+    let bucket = Arc::new(Mutex::new(args[4].clone()));
+    let regtype = get_argument(&args, 5);
+    let client = Arc::new(Mutex::new(Client::new(host, org, token)));
+
+    // Get local IP addresses
     let self_ip: Option<Ipv4Addr> = match local_ip().unwrap() {
         IpAddr::V4(ipv4) => Some(ipv4),
         _ => None,
@@ -66,12 +74,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("No IPv6 address found! Unable to continue, exiting.");
         std::process::exit(1);
     }
+
+    // Start CoAP server
     let mut coap_server = Server::new(self_ipv6.to_string() + ":5682").unwrap();
     println!("CoAP server up on {}", self_ipv4);
 
 
-    tokio::spawn(async {
-        let service = DNSServiceBuilder::new("_coap._udp", 8080)
+    // Start DNS-SD service
+    tokio::spawn(async move {
+        let service = DNSServiceBuilder::new(&regtype[..], 8080)
             .with_key_value("status".into(), "open".into())
             .register();
         match service {
@@ -85,12 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let host = get_argument(&args, 1);
-    let org = get_argument(&args, 2);
-    let token = get_argument(&args, 3);
-    let bucket = Arc::new(Mutex::new(args[4].clone()));
-    let client = Arc::new(Mutex::new(Client::new(host, org, token)));
-
+    // CoAP request handler
     coap_server
         .run(move |request| {
             // Clone the Arc inside the closure
